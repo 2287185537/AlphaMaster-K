@@ -578,10 +578,13 @@ class AlphaEngine:
                 from .vocab import VOCAB_VERSION
                 strategy_data = {
                     "vocab_version": VOCAB_VERSION,
+                    "symbol": self.target_symbol,
                     "formula": self.best_formula,
                     "best_score": self.best_score,
                 }
-                with open(_STRATEGY_FILE, "w") as fp:
+                save_path = _strategy_file_for_symbol(self.target_symbol)
+                pathlib.Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+                with open(save_path, "w") as fp:
                     json.dump(strategy_data, fp, indent=2)
 
             if (step + 1) % 20 == 0 or (step + 1) == ModelConfig.TRAIN_STEPS:
@@ -626,22 +629,31 @@ class AlphaEngine:
             from .vocab import VOCAB_VERSION
             strategy_data = {
                 "vocab_version": VOCAB_VERSION,
+                "symbol": self.target_symbol,
                 "formula": self.best_formula,
                 "best_score": self.best_score,
             }
-            with open(_STRATEGY_FILE, "w") as fp:
+            save_path = _strategy_file_for_symbol(self.target_symbol)
+            pathlib.Path(save_path).parent.mkdir(parents=True, exist_ok=True)
+            with open(save_path, "w") as fp:
                 json.dump(strategy_data, fp, indent=2)
+
+        sym_tag = f"[{self.target_symbol}] " if self.target_symbol else ""
         self.training_history.pop('_low_entropy_streak', None)
-        with open("training_history.json", "w") as fp:
+        hist_path = (
+            f"training_history_{self.target_symbol}.json"
+            if self.target_symbol else "training_history.json"
+        )
+        with open(hist_path, "w") as fp:
             json.dump(self.training_history, fp)
 
-        print(f"\n✓ Training completed!")
+        print(f"\n✓ {sym_tag}Training completed!")
         print(f"  Best val score : {self.best_score:.4f}")
         print(f"  Best formula   : {self.best_formula}")
         print(f"  Readable       : {self._decode_formula(self.best_formula)}")
         print(f"  Elite pool     : {len(self._elite_pool)}")
         print(f"  Restarts       : {self._restart_count}")
-        print(f"  Strategy saved : {_STRATEGY_FILE}")
+        print(f"  Strategy saved : {save_path}")
 
 
     # ── Checkpoint save / load ────────────────────────────────────────────────
@@ -649,7 +661,8 @@ class AlphaEngine:
     def save_checkpoint(self, step: int, path: str | None = None) -> str:
         _CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
         if path is None:
-            path = str(_CHECKPOINT_DIR / f"ckpt_step_{step:04d}.pt")
+            sym_tag = f"_{self.target_symbol}" if self.target_symbol else ""
+            path = str(_CHECKPOINT_DIR / f"ckpt{sym_tag}_step_{step:04d}.pt")
         ckpt = {
             "step":                 step,
             "model_state_dict":     self.model.state_dict(),
