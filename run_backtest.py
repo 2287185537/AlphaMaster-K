@@ -244,7 +244,9 @@ def main():
 
         # ── 4. 为每品种计算因子 + 回测 ───────────────────────────────
         vm   = StackVM()
-        feat = MT5FeatureEngineer.compute_features(raw_dict)  # [N, F, T]
+        # 因果特征化：_robust_norm 现为滚动窗口实现，传入全量序列是安全的
+        # 每个时间步 t 的归一化参数只依赖 [t-w+1..t]，无 look-ahead
+        feat = MT5FeatureEngineer.compute_features(raw_dict)  # [N, F, T]，因果安全
 
         results_map = {}
         backtest_results = []

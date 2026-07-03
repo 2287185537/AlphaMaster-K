@@ -2,9 +2,30 @@ import torch
 from .ops import OPS_CONFIG
 from .vocab import FORMULA_VOCAB
 
+# ── 扩展后词表规模说明（task 12.1）──────────────────────────────────────────
+#
+# 本次扩展（factor-operator-library-expansion）后：
+#   - 特征数 F  = len(FORMULA_VOCAB.feature_names)  （当前 65，覆盖 8 大类）
+#   - 算子数 O  = len(OPS_CONFIG)                    （当前 66）
+#   - 词表总 size = F + O = 131
+#   - feat_offset = F = 65（feature token id ∈ [0, 64]）
+#   - operator token id ∈ [F, F+O-1] = [65, 130]
+#
+# StackVM 的 op_map / arity_map **完全动态**从 FORMULA_VOCAB 与 OPS_CONFIG 派生，
+# 不硬编码任何 token 数或偏移值，因此无需在此处做任何结构变更。后续再次扩展
+# 特征或算子时只需更新注册表，VM 自动消费。
+#
+# Cross-sectional 算子（CS_RANK / CS_SCALE / CS_NEUTRALIZE）沿 N 维逐时间步
+# 操作，输入/输出形状均为 [N, T]，满足统一的 [N,T]→[N,T] 契约（R2.9）；
+# VM 主循环无需对它们做任何特殊处理。
+
+
 class StackVM:
     def __init__(self):
+        # feat_offset 动态从 FORMULA_VOCAB.operator_offset 读取（= feature_count = F）。
+        # 扩展后 F=65，因此 feature token id ∈ [0, 64]，operator token id ∈ [65, 130]。
         self.feat_offset = FORMULA_VOCAB.operator_offset
+        # op_map / arity_map 动态从 OPS_CONFIG 构建，算子总数 = len(OPS_CONFIG) = 66。
         self.op_map = {i + self.feat_offset: cfg[1] for i, cfg in enumerate(OPS_CONFIG)}
         self.arity_map = {i + self.feat_offset: cfg[2] for i, cfg in enumerate(OPS_CONFIG)}
 

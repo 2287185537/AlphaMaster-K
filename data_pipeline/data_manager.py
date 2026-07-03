@@ -137,6 +137,8 @@ class MT5DataManager:
 
         try:
             from model_core.features import MT5FeatureEngineer  # lazy import
+            # 因果安全：MT5FeatureEngineer._robust_norm 已改为滚动因果实现，
+            # 全量序列传入不引入 look-ahead 泄露
             return MT5FeatureEngineer.compute_features(raw)
         except ImportError:
             # model_core/features.py 尚未在任务 5.1 中创建

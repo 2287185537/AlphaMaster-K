@@ -12,6 +12,7 @@ from .config import ModelConfig
 from .alphagpt import AlphaGPT, NewtonSchulzLowRankDecay, StableRankMonitor
 from .vm import StackVM
 from .backtest import MT5Backtest
+from .vocab import FORMULA_VOCAB, VOCAB_VERSION, VocabVersionMismatchError  # task 12.2
 
 try:
     from config import Config as _RootConfig
@@ -332,6 +333,8 @@ class AlphaEngine:
         else:
             print(f"   退化为全量评估（T={T}）")
 
+        # 因果安全：features.py 的 _robust_norm 已改为滚动因果实现
+        # 每个 t 的归一化参数只用 [t-w+1..t]，walk-forward 折叠切片无泄露
         feat  = self.data_manager.feat_tensor.to(ModelConfig.DEVICE)
         t_ret = self.data_manager.target_ret.to(ModelConfig.DEVICE)
         bs      = ModelConfig.BATCH_SIZE
@@ -442,6 +445,7 @@ class AlphaEngine:
                     if use_wf:
                         fold_tr, fold_vl, fold_ic = [], [], []
                         for fold in folds:
+                            # res[:, train_start:train_end] 是在已无泄露的因子上切片，正确
                             tr_sc, vl_sc = self.bt.evaluate_fold(
                                 res, t_ret,
                                 fold["train_start"], fold["train_end"],
@@ -665,6 +669,7 @@ class AlphaEngine:
             path = str(_CHECKPOINT_DIR / f"ckpt{sym_tag}_step_{step:04d}.pt")
         ckpt = {
             "step":                 step,
+            "vocab_version":        VOCAB_VERSION,   # task 12.2: 版本校验所需
             "model_state_dict":     self.model.state_dict(),
             "optimizer_state_dict": self.opt.state_dict(),
             "best_score":           self.best_score,
@@ -685,6 +690,20 @@ class AlphaEngine:
 
     def load_checkpoint(self, path: str) -> int:
         ckpt = torch.load(path, map_location=ModelConfig.DEVICE)
+
+        # ── Task 12.2：版本校验（R3.7）──────────────────────────────────────
+        # 从 checkpoint 读取 vocab_version；若字段缺失（旧版 checkpoint），视为
+        # 版本不匹配并抛错——拒绝加载、不消费任何 token。
+        artifact_version = ckpt.get("vocab_version")
+        if artifact_version is None:
+            raise VocabVersionMismatchError(
+                f"checkpoint '{path}' 不含 vocab_version 字段（旧版产物），"
+                f"当前词表版本 {FORMULA_VOCAB.version!r}；需重新训练后加载"
+            )
+        # verify() 版本不匹配时抛 VocabVersionMismatchError，拒绝加载
+        FORMULA_VOCAB.verify(artifact_version)
+        # ── 版本校验通过，继续加载 ────────────────────────────────────────
+
         self.model.load_state_dict(ckpt["model_state_dict"])
         self.opt.load_state_dict(ckpt["optimizer_state_dict"])
         self.best_score          = ckpt.get("best_score",  -float('inf'))

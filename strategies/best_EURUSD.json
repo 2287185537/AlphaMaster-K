@@ -1,17 +1,17 @@
 {
-  "vocab_version": "2.0",
+  "vocab_version": "v6ff4c52e30c1",
   "symbol": "EURUSD",
   "group": "forex",
   "formula": [
     3,
-    45,
-    24,
-    44,
-    33,
-    34,
-    33,
-    34
+    23,
+    110,
+    42,
+    53,
+    104,
+    72,
+    109
   ],
-  "best_score": 5.9762115478515625,
+  "best_score": 5.9763946533203125,
   "source": "group_forex"
 }
