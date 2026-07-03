@@ -1,17 +1,14 @@
 import torch
 
-@torch.jit.script
 def _ts_delay(x: torch.Tensor, d: int) -> torch.Tensor:
     if d == 0: return x
-    pad = torch.zeros((x.shape[0], d), device=x.device)
+    pad = torch.zeros((x.shape[0], d), device=x.device, dtype=x.dtype)
     return torch.cat([pad, x[:, :-d]], dim=1)
 
-@torch.jit.script
 def _op_gate(condition: torch.Tensor, x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
     mask = (condition > 0).float()
     return mask * x + (1.0 - mask) * y
 
-@torch.jit.script
 def _op_jump(x: torch.Tensor) -> torch.Tensor:
     """降低稀疏度：阈值从 3σ 改为 1.5σ，让更多时间步有非零输出"""
     mean = x.mean(dim=1, keepdim=True)
@@ -19,11 +16,9 @@ def _op_jump(x: torch.Tensor) -> torch.Tensor:
     z = (x - mean) / std
     return torch.tanh(z - 1.5)   # tanh 软化，不再产生全零区间
 
-@torch.jit.script
 def _op_decay(x: torch.Tensor) -> torch.Tensor:
     return x + 0.8 * _ts_delay(x, 1) + 0.6 * _ts_delay(x, 2)
 
-@torch.jit.script
 def _op_wma(x: torch.Tensor) -> torch.Tensor:
     """加权移动平均（权重 3,2,1），平滑信号，减少剥头皮"""
     return (3.0 * x + 2.0 * _ts_delay(x, 1) + 1.0 * _ts_delay(x, 2)) / 6.0

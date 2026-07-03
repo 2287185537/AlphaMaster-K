@@ -235,8 +235,8 @@ class MT5Backtest:
         mean_to = turnover.mean()
         penalty = torch.clamp(
             (mean_to - 0.2) * 3.0,
-            min=torch.tensor(0.0),
-            max=torch.tensor(3.0),
+            min=0.0,
+            max=3.0,
         )
         return -penalty
 

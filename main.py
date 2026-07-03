@@ -3,6 +3,7 @@ main.py — 多因子训练入口（分组训练）
 
 使用方法：
     python main.py                      # 按 SYMBOL_GROUPS 分组训练（默认推荐）
+    python main.py --offline            # 仅使用本地缓存，不连接 MT5
     python main.py --single XAUUSD      # 只训练单个品种
     python main.py --cross-section      # 所有品种一起训练（截面）
     python main.py --group risk         # 只训练 risk 组
@@ -12,6 +13,16 @@ main.py — 多因子训练入口（分组训练）
     risk  组（XAUUSD, US100.cash, US500.cash）：风险资产，3品种×11000=33000样本
 """
 import sys, pathlib, json
+
+# 无控制台环境（如 Start-Process -WindowStyle Hidden）下，sys.stdout 可能为 None，
+# 导致 tqdm.write 报错。此时重定向到日志文件。
+if sys.stdout is None or sys.stderr is None:
+    _log_path = r"D:\素材\自动挖因子\training_stdout.log"
+    _log_fp = open(_log_path, "a", encoding="utf-8")
+    if sys.stdout is None:
+        sys.stdout = _log_fp
+    if sys.stderr is None:
+        sys.stderr = _log_fp
 
 from config import Config
 from data_pipeline.data_manager import MT5DataManager
@@ -100,6 +111,7 @@ def train_group(multi_mgr, group_name: str, symbols: list[str]):
 def main():
     cross    = "--cross-section" in sys.argv
     single   = "--single" in sys.argv
+    offline  = "--offline" in sys.argv
     grp_only = None
     if "--group" in sys.argv:
         idx      = sys.argv.index("--group")
@@ -108,14 +120,14 @@ def main():
 
     mode = "截面" if cross else ("单品种" if single else "分组")
     print(f"{'='*60}")
-    print(f"  AlphaGPT 训练 [{mode}模式]")
+    print(f"  AlphaGPT 训练 [{mode}模式]" + (" [离线缓存]" if offline else ""))
     print(f"  TRAIN_STEPS={ModelConfig.TRAIN_STEPS}  "
           f"MAX_FORMULA_LEN={ModelConfig.MAX_FORMULA_LEN}  "
           f"BATCH_SIZE={ModelConfig.BATCH_SIZE}")
     print(f"  SYMBOLS={Config.SYMBOLS}")
     print(f"{'='*60}")
 
-    with MT5DataFetcher() as fetcher:
+    with MT5DataFetcher(offline=offline) as fetcher:
         multi_mgr = MT5DataManager(fetcher)
         multi_mgr.load()
 

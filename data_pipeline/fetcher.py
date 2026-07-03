@@ -30,16 +30,29 @@ class MT5DataFetcher:
         fetcher.connect()
         df = fetcher.fetch("XAUUSD", mt5.TIMEFRAME_H1, 2000)
         fetcher.shutdown()
+
+    离线模式（仅读本地缓存，不连 MT5）：
+        with MT5DataFetcher(offline=True) as fetcher:
+            df = fetcher.fetch("XAUUSD", mt5.TIMEFRAME_H1, 2000)
     """
+
+    def __init__(self, offline: bool = False) -> None:
+        self.offline = offline
+        self._mt5_initialized = False
 
     def connect(self) -> None:
         """连接到 MT5 终端。
 
         调用 `mt5.initialize()`，若连接失败则抛出 `ConnectionError`。
+        离线模式下跳过连接，仅使用本地缓存。
 
         Raises:
-            ConnectionError: MT5 终端未运行或连接失败。
+            ConnectionError: MT5 终端未运行或连接失败（非离线模式）。
         """
+        if self.offline:
+            logger.info("[Fetcher] 离线模式：跳过 MT5 连接，仅使用本地缓存。")
+            return
+
         if not _MT5_AVAILABLE:
             raise ConnectionError("MetaTrader5 package is not installed.")
 
@@ -48,6 +61,7 @@ class MT5DataFetcher:
             error = mt5.last_error()  # type: ignore[union-attr]
             raise ConnectionError(f"MT5 connection failed: {error}")
 
+        self._mt5_initialized = True
         logger.info("MT5 connection established.")
 
     def fetch(self, symbol: str, timeframe: int, count: int) -> pd.DataFrame:
@@ -66,7 +80,13 @@ class MT5DataFetcher:
         try:
             from data_pipeline.kline_cache import KlineCache
             cache = KlineCache(timeframe=timeframe, bars_count=count)
-            df = cache.get(symbol, mt5_connected=(_MT5_AVAILABLE and mt5 is not None))
+            mt5_connected = (
+                not self.offline
+                and self._mt5_initialized
+                and _MT5_AVAILABLE
+                and mt5 is not None
+            )
+            df = cache.get(symbol, mt5_connected=mt5_connected)
             if df is not None and len(df) >= count * 0.5:
                 # 本地有足够数据（至少要求的 50%），直接返回最新的 count 根
                 return df.tail(count).reset_index(drop=True)
@@ -74,8 +94,9 @@ class MT5DataFetcher:
             logger.debug(f"[Fetcher] Cache read failed for {symbol}: {exc}, falling back to MT5")
 
         # ── 缓存不足时从 MT5 直接拉 ──────────────────────────────────
-        if not _MT5_AVAILABLE or mt5 is None:
-            logger.warning(f"MT5 not available, returning empty DataFrame for {symbol}.")
+        if self.offline or not _MT5_AVAILABLE or mt5 is None or not self._mt5_initialized:
+            logger.warning(f"{'Offline mode' if self.offline else 'MT5 not available'}, "
+                           f"returning empty DataFrame for {symbol}.")
             return pd.DataFrame(columns=_COLUMNS)
 
         rates = mt5.copy_rates_from_pos(symbol, timeframe, 0, count)  # type: ignore[union-attr]
@@ -93,7 +114,7 @@ class MT5DataFetcher:
 
     def shutdown(self) -> None:
         """断开与 MT5 终端的连接，释放资源。"""
-        if _MT5_AVAILABLE and mt5 is not None:
+        if not self.offline and self._mt5_initialized and _MT5_AVAILABLE and mt5 is not None:
             mt5.shutdown()  # type: ignore[union-attr]
             logger.info("MT5 connection closed.")
 

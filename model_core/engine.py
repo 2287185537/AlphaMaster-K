@@ -272,8 +272,8 @@ class AlphaEngine:
 
     def _update_factor_pool(self, val_score: float, factor: torch.Tensor) -> None:
         k     = ModelConfig.FACTOR_TOP_K
-        f_cpu = factor.detach().cpu()
-        entry = (val_score, self._factor_pool_counter, f_cpu)
+        f_gpu = factor.detach()
+        entry = (val_score, self._factor_pool_counter, f_gpu)
         self._factor_pool_counter += 1
         if len(self.factor_pool) < k:
             heapq.heappush(self.factor_pool, entry)
@@ -283,7 +283,7 @@ class AlphaEngine:
     def _apply_corr_penalty(self, reward: torch.Tensor, factor: torch.Tensor) -> torch.Tensor:
         if not self.factor_pool:
             return reward
-        f_flat = factor.detach().cpu().reshape(-1).float()
+        f_flat = factor.detach().reshape(-1).float()
         if f_flat.std() < 1e-4:
             return reward
         pool_vecs = torch.stack(
@@ -332,8 +332,8 @@ class AlphaEngine:
         else:
             print(f"   退化为全量评估（T={T}）")
 
-        feat  = self.data_manager.feat_tensor
-        t_ret = self.data_manager.target_ret
+        feat  = self.data_manager.feat_tensor.to(ModelConfig.DEVICE)
+        t_ret = self.data_manager.target_ret.to(ModelConfig.DEVICE)
         bs      = ModelConfig.BATCH_SIZE
         n_elite = max(1, int(bs * ModelConfig.ELITE_REPLAY_FRAC))
         n_new   = bs - n_elite
