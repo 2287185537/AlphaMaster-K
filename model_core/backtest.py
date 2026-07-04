@@ -335,11 +335,9 @@ class MT5Backtest:
         N = pnl.shape[0]
 
         # ── 绝对收益（年化 log return）──────────────────────────────────
-        # 连续仓位 pnl = position * target_ret - turnover * cost
-        # 年化因子 = periods_per_year / T
-        T_bars = pnl.shape[1]
-        ann_factor = self.periods_per_year / max(T_bars, 1)
-        ann_ret = pnl.mean() * ann_factor   # 标量张量，无截断
+        # 连续仓位 pnl = position * target_ret - turnover * cost。
+        # pnl.mean() 已是单 bar 平均收益，因此年化只乘每年 bar 数；不能再除以样本长度。
+        ann_ret = pnl.mean() * self.periods_per_year   # 标量张量，无截断
 
         port_sortino = self._sortino(pnl)
         port_calmar  = self._calmar(pnl)
@@ -349,11 +347,11 @@ class MT5Backtest:
 
         if N == 1:
             return (
-                0.40 * ann_ret           # 主目标：年化绝对收益
-                + 0.20 * port_sortino    # 风险调整辅助
-                + 0.15 * port_calmar     # 回撤控制辅助
-                + 0.15 * ts_ic           # IC 预测方向
-                + 0.10 * tq              # 交易频率质量
+                0.60 * ann_ret           # 主目标：年化绝对收益
+                + 0.15 * port_sortino    # 风险调整辅助
+                + 0.10 * port_calmar     # 回撤控制辅助
+                + 0.10 * ts_ic           # IC 预测方向
+                + 0.05 * tq              # 交易频率质量
                 + exp_pen                # 稀疏惩罚
             )
 
@@ -374,13 +372,13 @@ class MT5Backtest:
         cost_s   = self._cost_stress(position, target_ret)
 
         return (
-            0.40 * ann_ret               # 主目标：年化绝对收益
-            + 0.15 * port_sortino        # 风险调整辅助
-            + 0.10 * port_calmar         # 回撤控制辅助
+            0.60 * ann_ret               # 主目标：年化绝对收益
+            + 0.10 * port_sortino        # 风险调整辅助
+            + 0.05 * port_calmar         # 回撤控制辅助
             + 0.10 * ts_ic               # IC 预测方向
-            + 0.10 * sym_cons            # 品种一致性
+            + 0.05 * sym_cons            # 品种一致性
             + 0.05 * cost_s              # 成本压力测试
-            + 0.10 * tq                  # 交易频率质量
+            + 0.05 * tq                  # 交易频率质量
             + exp_pen                    # 稀疏惩罚
         )
 

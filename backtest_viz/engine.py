@@ -1,7 +1,7 @@
 """
 backtest_viz/engine.py — 逐 bar 可视化回测引擎
 
-与训练用 backtest.py 共享相同的信号逻辑（tanh→sign），
+与训练用 backtest.py 共享相同的信号逻辑（tanh 连续仓位），
 但额外记录每笔交易的开平仓细节，供图表标注使用。
 """
 from __future__ import annotations
@@ -14,7 +14,7 @@ import numpy as np
 import torch
 
 from model_core.vm import StackVM
-from strategy_manager.signal import compute_target_positions
+from strategy_manager.signal import target_to_direction
 
 _H1_PERIODS_PER_YEAR = 6240
 
@@ -46,7 +46,7 @@ class SymbolResult:
     volume:       np.ndarray     # [T]
     factor:       np.ndarray     # StackVM 输出，[T]
     signal:       np.ndarray     # tanh(factor)，[T]
-    position:     np.ndarray     # sign(signal) ∈ {-1,0,+1}，[T]
+    position:     np.ndarray     # 连续仓位 ∈ [-1,+1]，[T]
     pnl:          np.ndarray     # 逐 bar PnL，[T]
     cum_pnl:      np.ndarray     # 累计 PnL，[T]
     trades:       list[Trade]    = field(default_factory=list)
@@ -125,7 +125,8 @@ class BacktestEngine:
         # numpy 转换（便于后续图表处理）
         factor_np   = factor_1d.detach().float().numpy()
         # 连续仓位模式：tanh 直接作为仓位比例，与训练 backtest.py 完全一致
-        position_np = np.tanh(factor_np)
+        signal_np   = np.tanh(factor_np)
+        position_np = signal_np
 
         open_np   = raw_dict["open"].float().numpy()
         high_np   = raw_dict["high"].float().numpy()
@@ -204,7 +205,7 @@ class BacktestEngine:
     def _extract_trades(
         self,
         symbol:      str,
-        position:    np.ndarray,   # [T]
+        position:    np.ndarray,   # [T] 连续仓位
         open_prices: np.ndarray,   # [T]
         times:       np.ndarray,   # [T]
         pnl:         np.ndarray,   # [T]
@@ -236,7 +237,7 @@ class BacktestEngine:
             return int(times[idx])
 
         for t in range(T):
-            new_dir = int(position[t])
+            new_dir = target_to_direction(float(position[t]))
 
             if new_dir != current_dir:
                 # 平掉旧仓

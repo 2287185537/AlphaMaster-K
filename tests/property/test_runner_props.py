@@ -151,7 +151,10 @@ def test_property12_buy_signal_triggers_buy(scenario: dict):
 
     Validates: Requirements 10.4
     """
-    from strategy_manager.signal import reconcile_action, OPEN_LONG, OPEN_SHORT, CLOSE, HOLD
+    from strategy_manager.signal import (
+        reconcile_action, target_to_direction,
+        OPEN_LONG, OPEN_SHORT, CLOSE, HOLD,
+    )
 
     symbols: List[str] = scenario["symbols"]
     raw_scores: List[float] = scenario["scores"]
@@ -172,7 +175,7 @@ def test_property12_buy_signal_triggers_buy(scenario: dict):
 
     # 验证每个品种的 reconcile 结果
     for idx, sym in enumerate(symbols):
-        target  = int(targets[idx].item())
+        target  = target_to_direction(float(targets[idx].item()))
         current = 1 if sym in held_symbols else 0
         expected_action = reconcile_action(current, target)
 

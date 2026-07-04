@@ -85,7 +85,7 @@ class Config:
 
     # ── 数据参数 ──────────────────────────────────────────
     TIMEFRAME             = mt5.TIMEFRAME_H1   # K 线周期
-    BARS_COUNT            = 12000  # 每品种拉取的历史 K 线数（已改为按组独立加载，不取交集）
+    BARS_COUNT            = 50000  # 每品种拉取的历史 K 线数（已改为按组独立加载，不取交集）
     MIN_BARS              = 3000   # 低于此值的品种被排除
     DATA_REFRESH_INTERVAL = 300    # 秒，实盘数据刷新间隔
     KLINE_CACHE_DIR       = r"D:\K线数据"  # 本地 K 线缓存目录
@@ -104,14 +104,15 @@ class Config:
     )
 
     # ── 风控参数 ──────────────────────────────────────────
-    RISK_PER_TRADE     = 0.001     # 每笔风险敞口（账户净值的 0.1%，保守起步）
+    RISK_PER_TRADE     = 0.01      # 收益优先：每笔 1 个 ATR 波动约对应账户净值 1%
     COST_RATE          = 0.0001    # 单边点差+佣金（forex/metals）
     MAX_OPEN_POSITIONS = 4         # 最多同时持仓品种数
-    MAX_LOT_PER_TRADE  = 0.1       # 单笔最大手数硬性上限（防止计算异常放大）
+    MAX_LOT_PER_TRADE  = 1.0       # 收益优先上限；仍受 MT5 品种规格和保证金约束
+    MIN_TRADE_EXPOSURE = 0.05      # |tanh(factor)| 小于该值时视为空仓，回测/实盘共用
 
     # ── 策略参数 ──────────────────────────────────────────
     # SIGNAL_MODE 控制信号→仓位的转换方式：
-    #   "backtest_parity": tanh→sign，与 backtest.py 完全一致（推荐）
+    #   "backtest_parity": tanh 连续仓位，与 backtest.py 完全一致（推荐）
     #   "threshold":       sigmoid + BUY_THRESHOLD / SELL_THRESHOLD（旧逻辑）
     SIGNAL_MODE = "backtest_parity"
 

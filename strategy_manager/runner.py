@@ -2,7 +2,7 @@
 strategy_manager/runner.py — MT5 策略主循环控制器（回测对标版）
 
 核心改动（vs 旧版本）：
-  1. 信号改为 tanh→sign，与 backtest.py 完全一致（Config.SIGNAL_MODE）
+  1. 信号改为 tanh 连续仓位，与 backtest.py 完全一致（Config.SIGNAL_MODE）
   2. 入场/出场统一为「信号翻转驱动」(_reconcile_positions)
   3. 支持做空，多/空均可反手
   4. K 线收盘触发调仓（REBALANCE_ON_BAR_CLOSE=True），消除时间偏差
@@ -15,6 +15,7 @@ import json
 import os
 import sys
 import time
+from numbers import Real
 
 import torch
 from loguru import logger
@@ -45,6 +46,7 @@ from strategy_manager.portfolio import MT5PortfolioManager
 from strategy_manager.risk import MT5RiskEngine
 from strategy_manager.signal import (
     compute_target_positions,
+    target_to_direction,
     reconcile_action,
     HOLD, OPEN_LONG, OPEN_SHORT, CLOSE, REVERSE_TO_LONG, REVERSE_TO_SHORT,
 )
@@ -279,12 +281,13 @@ class MT5StrategyRunner:
         return True
 
     def _compute_targets(self) -> torch.Tensor | None:
-        """为每个品种用各自的公式计算目标仓位 {-1, 0, +1}，形状 [N]。
+        """为每个品种用各自的公式计算连续目标仓位 [-1, +1]，形状 [N]。
 
         多因子模式：每品种独立运行 StackVM，使用 strategies/best_{sym}.json 中的公式。
         单公式模式：所有品种共用同一个公式（回退兼容）。
 
-        实盘使用 stateful neutral band（传入当前持仓做滞后出场）。
+        backtest_parity 模式与训练回测共用 tanh 连续仓位；执行层再把连续值转方向，
+        并用绝对值缩放 ATR 风险手数。
         """
         if self._data_manager is None:
             return None
@@ -331,7 +334,7 @@ class MT5StrategyRunner:
             logger.info(
                 f"[Runner] targets: " +
                 " | ".join(
-                    f"{sym}={int(targets[i].item()):+d}"
+                    f"{sym}={targets[i].item():+.2f}"
                     for i, sym in enumerate(symbols)
                 )
             )
@@ -346,7 +349,7 @@ class MT5StrategyRunner:
 
         对账逻辑（严格对标回测）：
             current = portfolio.get_direction(symbol)  # +1 / -1 / 0
-            target  = targets[i]                       # +1 / -1 / 0
+            target  = sign(targets[i]) with min exposure band
             action  = reconcile_action(current, target)
 
         根据 action 执行对应 MT5 订单。
@@ -358,13 +361,18 @@ class MT5StrategyRunner:
         n = min(len(symbols), len(targets))
 
         for idx in range(n):
-            symbol  = symbols[idx]
-            target  = int(targets[idx].item())   # +1 / -1 / 0
-            current = self.portfolio.get_direction(symbol)
-            action  = reconcile_action(current, target)
+            symbol       = symbols[idx]
+            target_value = float(targets[idx].item())
+            target       = target_to_direction(target_value)
+            exposure     = abs(target_value) if target != 0 else 0.0
+            current      = self.portfolio.get_direction(symbol)
+            action       = reconcile_action(current, target)
 
             if action == HOLD:
-                logger.debug(f"[Reconcile] {symbol}: HOLD (dir={current})")
+                logger.debug(
+                    f"[Reconcile] {symbol}: HOLD "
+                    f"(dir={current}, target={target_value:+.2f})"
+                )
                 continue
 
             # MAX_OPEN_POSITIONS 约束（None 表示不限）
@@ -377,25 +385,30 @@ class MT5StrategyRunner:
                     )
                     continue
 
-            logger.info(f"[Reconcile] {symbol}: {action}  current={current}→target={target}")
-
-            # 计算手数
-            lot = self._calc_lot(symbol)
-            if lot <= 0:
-                logger.warning(f"[Reconcile] {symbol}: lot=0, skipping.")
-                continue
+            logger.info(
+                f"[Reconcile] {symbol}: {action}  current={current}→target={target} "
+                f"raw={target_value:+.2f}"
+            )
 
             pos = self.portfolio.positions.get(symbol)
             ticket = pos.ticket if pos is not None else 0
 
             # ── 执行动作 ────────────────────────────────────────────
             if action == OPEN_LONG:
+                lot = self._calc_lot(symbol, exposure)
+                if lot <= 0:
+                    logger.warning(f"[Reconcile] {symbol}: lot=0, skipping.")
+                    continue
                 ok = self.trader.buy(symbol, lot)
                 if ok:
                     price = self._get_price(symbol)
                     self.portfolio.add_position(symbol, 0, price, lot, "BUY")
 
             elif action == OPEN_SHORT:
+                lot = self._calc_lot(symbol, exposure)
+                if lot <= 0:
+                    logger.warning(f"[Reconcile] {symbol}: lot=0, skipping.")
+                    continue
                 ok = self.trader.open_short(symbol, lot)
                 if ok:
                     price = self._get_price(symbol)
@@ -409,6 +422,10 @@ class MT5StrategyRunner:
                     self.portfolio.close_position(symbol)
 
             elif action == REVERSE_TO_LONG:
+                lot = self._calc_lot(symbol, exposure)
+                if lot <= 0:
+                    logger.warning(f"[Reconcile] {symbol}: lot=0, skipping.")
+                    continue
                 # 先平空，再开多
                 if pos:
                     ok_close = self.trader.close_position(
@@ -422,6 +439,10 @@ class MT5StrategyRunner:
                     self.portfolio.add_position(symbol, 0, price, lot, "BUY")
 
             elif action == REVERSE_TO_SHORT:
+                lot = self._calc_lot(symbol, exposure)
+                if lot <= 0:
+                    logger.warning(f"[Reconcile] {symbol}: lot=0, skipping.")
+                    continue
                 # 先平多，再开空
                 if pos:
                     ok_close = self.trader.close_position(
@@ -522,12 +543,15 @@ class MT5StrategyRunner:
     # 辅助
     # ──────────────────────────────────────────────────────────────────────
 
-    def _calc_lot(self, symbol: str) -> float:
+    def _calc_lot(self, symbol: str, exposure: float = 1.0) -> float:
         """基于 ATR 波动率目标计算手数，让各品种盈亏金额均衡。
 
         使用最新 14-bar ATR 作为波动参考，目标每笔 1个ATR波动 = equity × RISK_PER_TRADE。
-        这样黄金、纳指、美日的每笔风险敞口在账户货币层面是相同的。
+        exposure 来自连续目标仓位绝对值，用于把 tanh 强弱映射到实际风险金额。
         """
+        exposure = max(0.0, min(1.0, float(exposure)))
+        if exposure <= 0:
+            return 0.0
         account = self.trader.get_account_info()
         if account is None:
             return 0.0
@@ -535,7 +559,7 @@ class MT5StrategyRunner:
 
         # 从当前数据中取该品种最近 14 根 K 线的 ATR
         atr_price = self._get_atr(symbol)
-        if atr_price is None or atr_price <= 0:
+        if not isinstance(atr_price, Real) or atr_price <= 0:
             # ATR 获取失败：回退到最小手数，避免不交易
             logger.warning(f"[_calc_lot] {symbol}: ATR 获取失败，使用最小手数")
             try:
@@ -546,10 +570,14 @@ class MT5StrategyRunner:
                 return 0.01
 
         max_lot = getattr(Config, "MAX_LOT_PER_TRADE", 0.1)
+        base_risk = getattr(self.risk, "risk_per_trade", Config.RISK_PER_TRADE)
+        if not isinstance(base_risk, Real) or base_risk <= 0:
+            base_risk = Config.RISK_PER_TRADE
         lot = self.risk.calculate_lot_by_atr(
             symbol=symbol,
             equity=equity,
             atr_price=atr_price,
+            target_risk_pct=base_risk * exposure,
             max_lot=max_lot,
         )
         return lot

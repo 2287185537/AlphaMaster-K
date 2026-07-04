@@ -49,7 +49,7 @@ class ModelConfig:
     REWARD_ALPHA:      float = 1.0
     IC_GATE_THRESH:    float = 0.01
     IC_GATE_MULT:      float = 1.15
-    IC_NEG_MULT:       float = 0.50   # 0.30 → 0.50
+    IC_NEG_MULT:       float = 0.75   # 收益优先：不过度误杀反向/非线性高收益因子
 
     # ── 熵保护（大空间加强版）──────────────────────────────────────────
     # ENTROPY_COEFF_MAX 0.5→1.0：加倍探索压力，对抗大 vocab 的过早收敛。
@@ -73,9 +73,9 @@ class ModelConfig:
     RESTART_NOISE:  float = 0.1
 
     # ── 因子去相关参数 ────────────────────────────────────────────────
-    FACTOR_TOP_K:     int   = 10
-    CORR_THRESHOLD:   float = 0.7
-    CORR_PENALTY:     float = 0.5
+    FACTOR_TOP_K:     int   = 25
+    CORR_THRESHOLD:   float = 0.85
+    CORR_PENALTY:     float = 0.8
 
     # ── Walk-Forward Gap ───────────────────────────────────────────────
     WF_GAP: int = 20

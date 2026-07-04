@@ -21,6 +21,15 @@ from torch import Tensor
 # ── 保留实盘用的阈值参数（实盘 Runner 可能还读取这些常量）──────────────────
 ENTRY_THRESHOLD: float = 0.3
 EXIT_THRESHOLD:  float = 0.1
+MIN_TRADE_EXPOSURE: float = 0.05
+
+
+def _min_trade_exposure() -> float:
+    try:
+        from config import Config
+        return float(getattr(Config, "MIN_TRADE_EXPOSURE", MIN_TRADE_EXPOSURE))
+    except Exception:
+        return MIN_TRADE_EXPOSURE
 
 
 def compute_target_positions(
@@ -36,15 +45,25 @@ def compute_target_positions(
         factors:        [N, T] 或 [N] 的因子张量。
         prev_positions: 保留参数，连续模式下忽略。
     """
-    return torch.tanh(factors)
+    pos = torch.tanh(factors)
+    min_abs = _min_trade_exposure()
+    if min_abs > 0:
+        pos = torch.where(pos.abs() >= min_abs, pos, torch.zeros_like(pos))
+    return pos
 
-    if prev_positions is None:
-        # 训练模式：无状态，中间区直接空仓
-        pos = torch.zeros_like(factors)
-        pos[long_mask]  =  1.0
 def compute_target_positions_stateless(factors: Tensor) -> Tensor:
     """无状态版本，供训练回测快速计算（连续仓位模式）。"""
     return compute_target_positions(factors, prev_positions=None)
+
+
+def target_to_direction(target: float, min_abs: float | None = None) -> int:
+    """把连续目标仓位转成 MT5 可执行方向。"""
+    threshold = _min_trade_exposure() if min_abs is None else float(min_abs)
+    if target >= threshold:
+        return 1
+    if target <= -threshold:
+        return -1
+    return 0
 
 
 # ── 动作常量 ──────────────────────────────────────────────────────────────────
