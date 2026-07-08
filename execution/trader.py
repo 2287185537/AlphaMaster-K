@@ -342,3 +342,71 @@ class MT5Trader:
             return False
         logger.info(f"[open_short] Success — {symbol} {lot} lot, ticket={result.order}")
         return True
+
+    # ──────────────────────────────────────────────────────
+    # 持仓查询 / 批量平仓
+    # ──────────────────────────────────────────────────────
+
+    def get_positions(
+        self,
+        symbol: str | None = None,
+        magic: int | None = None,
+    ) -> list:
+        """查询 MT5 当前持仓，可按品种与 magic 过滤。"""
+        if not _MT5_AVAILABLE or mt5 is None:
+            return []
+        if symbol:
+            live = mt5.positions_get(symbol=symbol)
+        else:
+            live = mt5.positions_get()
+        if live is None:
+            return []
+        positions = list(live)
+        if magic is not None:
+            positions = [p for p in positions if getattr(p, "magic", 0) == magic]
+        return positions
+
+    def close_all_positions(
+        self,
+        symbol: str,
+        magic: int | None = None,
+        *,
+        filter_magic: bool = True,
+    ) -> bool:
+        """平掉指定品种下全部持仓（按 position ticket）。
+
+        filter_magic=False 时平掉该品种所有 magic 的仓位。
+        """
+        eff_magic = None
+        if filter_magic:
+            eff_magic = Config.MAGIC_NUMBER if magic is None else magic
+        ok_all = True
+
+        while True:
+            positions = self.get_positions(symbol, eff_magic)
+            if not positions:
+                return ok_all
+
+            closed_any = False
+            for p in positions:
+                direction = "BUY" if getattr(p, "type", 0) == 0 else "SELL"
+                ticket = int(getattr(p, "ticket", 0))
+                lot = float(getattr(p, "volume", 0.0))
+                if ticket <= 0 or lot <= 0:
+                    continue
+                if self.close_position(symbol, lot, direction, ticket):
+                    closed_any = True
+                    continue
+
+                # 可能已被前一笔平掉；若 ticket 已不在持仓列表则视为成功
+                still_open = {
+                    int(getattr(x, "ticket", 0))
+                    for x in self.get_positions(symbol, eff_magic)
+                }
+                if ticket not in still_open:
+                    closed_any = True
+                else:
+                    ok_all = False
+
+            if not closed_any:
+                return ok_all

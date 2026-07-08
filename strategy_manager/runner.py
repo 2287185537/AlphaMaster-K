@@ -468,8 +468,24 @@ class MT5StrategyRunner:
             target_value = float(targets[idx].item())
             target       = target_to_direction(target_value)
             exposure     = abs(target_value) if target != 0 else 0.0
-            current      = self.portfolio.get_direction(symbol)
-            action       = reconcile_action(current, target)
+
+            # 以 MT5 实盘为准；对冲账户下同品种可能多空并存，需先清理
+            live_positions = self.trader.get_positions(symbol, Config.MAGIC_NUMBER)
+            has_buy = any(getattr(p, "type", 0) == 0 for p in live_positions)
+            has_sell = any(getattr(p, "type", 0) == 1 for p in live_positions)
+            if has_buy and has_sell:
+                logger.warning(
+                    f"[Reconcile] {symbol}: 检测到同品种多空并存，先全部平仓"
+                )
+                if self._close_symbol_positions(symbol):
+                    current = 0
+                else:
+                    logger.error(f"[Reconcile] {symbol}: 清理多空并存失败，跳过本轮")
+                    continue
+            else:
+                current = self._mt5_net_direction(symbol, live_positions)
+
+            action = reconcile_action(current, target)
 
             if action == HOLD:
                 logger.debug(
@@ -493,70 +509,56 @@ class MT5StrategyRunner:
                 f"raw={target_value:+.2f}"
             )
 
-            pos = self.portfolio.positions.get(symbol)
-            ticket = pos.ticket if pos is not None else 0
-
             # ── 执行动作 ────────────────────────────────────────────
             if action == OPEN_LONG:
+                if self.trader.get_positions(symbol, Config.MAGIC_NUMBER):
+                    if not self._close_symbol_positions(symbol):
+                        logger.error(f"[Reconcile] {symbol}: 开仓前清理旧仓失败")
+                        continue
                 lot = self._calc_lot(symbol, exposure)
                 if lot <= 0:
                     logger.warning(f"[Reconcile] {symbol}: lot=0, skipping.")
                     continue
-                ok = self.trader.buy(symbol, lot)
-                if ok:
-                    price = self._get_price(symbol)
-                    self.portfolio.add_position(symbol, 0, price, lot, "BUY")
+                if self.trader.buy(symbol, lot):
+                    self._record_position_after_open(symbol, "BUY", lot)
 
             elif action == OPEN_SHORT:
+                if self.trader.get_positions(symbol, Config.MAGIC_NUMBER):
+                    if not self._close_symbol_positions(symbol):
+                        logger.error(f"[Reconcile] {symbol}: 开仓前清理旧仓失败")
+                        continue
                 lot = self._calc_lot(symbol, exposure)
                 if lot <= 0:
                     logger.warning(f"[Reconcile] {symbol}: lot=0, skipping.")
                     continue
-                ok = self.trader.open_short(symbol, lot)
-                if ok:
-                    price = self._get_price(symbol)
-                    self.portfolio.add_position(symbol, 0, price, lot, "SELL")
+                if self.trader.open_short(symbol, lot):
+                    self._record_position_after_open(symbol, "SELL", lot)
 
             elif action == CLOSE:
-                direction = pos.direction if pos else "BUY"
-                ok = self.trader.close_position(symbol, pos.lot_size if pos else lot,
-                                                direction, ticket)
-                if ok:
+                if self._close_symbol_positions(symbol):
                     self.portfolio.close_position(symbol)
 
             elif action == REVERSE_TO_LONG:
+                if not self._close_symbol_positions(symbol):
+                    logger.error(f"[Reconcile] {symbol}: 反手平空失败，跳过开多")
+                    continue
                 lot = self._calc_lot(symbol, exposure)
                 if lot <= 0:
                     logger.warning(f"[Reconcile] {symbol}: lot=0, skipping.")
                     continue
-                # 先平空，再开多
-                if pos:
-                    ok_close = self.trader.close_position(
-                        symbol, pos.lot_size, pos.direction, ticket
-                    )
-                    if ok_close:
-                        self.portfolio.close_position(symbol)
-                ok_open = self.trader.buy(symbol, lot)
-                if ok_open:
-                    price = self._get_price(symbol)
-                    self.portfolio.add_position(symbol, 0, price, lot, "BUY")
+                if self.trader.buy(symbol, lot):
+                    self._record_position_after_open(symbol, "BUY", lot)
 
             elif action == REVERSE_TO_SHORT:
+                if not self._close_symbol_positions(symbol):
+                    logger.error(f"[Reconcile] {symbol}: 反手平多失败，跳过开空")
+                    continue
                 lot = self._calc_lot(symbol, exposure)
                 if lot <= 0:
                     logger.warning(f"[Reconcile] {symbol}: lot=0, skipping.")
                     continue
-                # 先平多，再开空
-                if pos:
-                    ok_close = self.trader.close_position(
-                        symbol, pos.lot_size, pos.direction, ticket
-                    )
-                    if ok_close:
-                        self.portfolio.close_position(symbol)
-                ok_open = self.trader.open_short(symbol, lot)
-                if ok_open:
-                    price = self._get_price(symbol)
-                    self.portfolio.add_position(symbol, 0, price, lot, "SELL")
+                if self.trader.open_short(symbol, lot):
+                    self._record_position_after_open(symbol, "SELL", lot)
 
     def _monitor_positions(self) -> None:
         """可选风控层（EXIT_MODE='risk' 或 'hybrid'）。
@@ -590,9 +592,7 @@ class MT5StrategyRunner:
                     f"[Monitor] STOP LOSS: {symbol} {pos.direction} "
                     f"profit={profit:.2%}"
                 )
-                ok = self.trader.close_position(
-                    symbol, pos.lot_size, pos.direction, pos.ticket
-                )
+                ok = self.trader.close_all_positions(symbol, Config.MAGIC_NUMBER)
                 if ok:
                     self.portfolio.close_position(symbol)
                 continue
@@ -646,44 +646,121 @@ class MT5StrategyRunner:
     # 辅助
     # ──────────────────────────────────────────────────────────────────────
 
-    def _calc_lot(self, symbol: str, exposure: float = 1.0) -> float:
-        """基于 ATR 波动率目标计算手数，让各品种盈亏金额均衡。
+    def _mt5_net_direction(self, symbol: str, live_positions: list | None = None) -> int:
+        """根据 MT5 实盘持仓计算品种净方向。"""
+        positions = (
+            live_positions
+            if live_positions is not None
+            else self.trader.get_positions(symbol, Config.MAGIC_NUMBER)
+        )
+        net = 0.0
+        for p in positions:
+            vol = float(getattr(p, "volume", 0.0))
+            if getattr(p, "type", 0) == 0:
+                net += vol
+            else:
+                net -= vol
+        if net > 0:
+            return 1
+        if net < 0:
+            return -1
+        return 0
 
-        使用最新 14-bar ATR 作为波动参考，目标每笔 1个ATR波动 = equity × RISK_PER_TRADE。
-        exposure 来自连续目标仓位绝对值，用于把 tanh 强弱映射到实际风险金额。
-        """
+    def _close_symbol_positions(self, symbol: str) -> bool:
+        """平掉该品种下本策略全部持仓，并同步本地状态。"""
+        ok = self.trader.close_all_positions(symbol, Config.MAGIC_NUMBER)
+        if ok and symbol in self.portfolio.positions:
+            self.portfolio.close_position(symbol)
+        return ok
+
+    def _record_position_after_open(self, symbol: str, direction: str, lot: float) -> None:
+        """开仓后从 MT5 回读 position ticket，避免 ticket=0 导致反手误开新单。"""
+        positions = self.trader.get_positions(symbol, Config.MAGIC_NUMBER)
+        want_type = 0 if direction == "BUY" else 1
+        matched = [p for p in positions if getattr(p, "type", -1) == want_type]
+        if not matched and positions:
+            matched = [positions[-1]]
+
+        if matched:
+            p = matched[-1]
+            price = float(getattr(p, "price_open", 0.0))
+            if price <= 0:
+                price = self._get_price(symbol) or 0.0
+            self.portfolio.add_position(
+                symbol,
+                int(getattr(p, "ticket", 0)),
+                price,
+                float(getattr(p, "volume", lot)),
+                direction,
+            )
+            return
+
+        price = self._get_price(symbol) or 0.0
+        logger.warning(f"[Runner] {symbol}: 开仓后未读到 MT5 持仓，本地 ticket 暂记为 0")
+        self.portfolio.add_position(symbol, 0, price, lot, direction)
+
+    def _calc_lot(self, symbol: str, exposure: float = 1.0) -> float:
+        """按 XAUUSD 0.01 手的 ATR 美元波动预算计算手数。"""
         exposure = max(0.0, min(1.0, float(exposure)))
         if exposure <= 0:
             return 0.0
-        account = self.trader.get_account_info()
-        if account is None:
-            return 0.0
-        equity = account["equity"]
+
+        fixed_map = getattr(Config, "FIXED_LOT_BY_SYMBOL", {}) or {}
+        sym_key = symbol.upper().split(".")[0] if "." not in symbol else symbol
+        if symbol in fixed_map:
+            return float(fixed_map[symbol])
+        if sym_key in fixed_map:
+            return float(fixed_map[sym_key])
 
         # 从当前数据中取该品种最近 14 根 K 线的 ATR
         atr_price = self._get_atr(symbol)
         if not isinstance(atr_price, Real) or atr_price <= 0:
-            # ATR 获取失败：回退到最小手数，避免不交易
-            logger.warning(f"[_calc_lot] {symbol}: ATR 获取失败，使用最小手数")
-            try:
-                import MetaTrader5 as mt5
-                info = mt5.symbol_info(symbol)
-                return info.volume_min if info else 0.01
-            except Exception:
-                return 0.01
+            logger.warning(f"[_calc_lot] {symbol}: ATR 获取失败，跳过开仓")
+            return 0.0
+
+        ref_symbol = getattr(Config, "VOL_TARGET_REFERENCE_SYMBOL", "XAUUSD")
+        ref_lot = float(getattr(Config, "VOL_TARGET_REFERENCE_LOT", 0.01))
+        ref_atr = self._get_atr(ref_symbol)
+        if not isinstance(ref_atr, Real) or ref_atr <= 0:
+            logger.warning(f"[_calc_lot] {symbol}: reference ATR 获取失败 ({ref_symbol})")
+            return 0.0
+
+        ref_value_per_unit = self.risk.value_per_price_unit(ref_symbol)
+        if ref_value_per_unit <= 0:
+            logger.warning(f"[_calc_lot] {symbol}: reference tick value 获取失败 ({ref_symbol})")
+            return 0.0
+
+        target_usd = ref_lot * ref_atr * ref_value_per_unit
 
         max_lot = getattr(Config, "MAX_LOT_PER_TRADE", 0.1)
-        base_risk = getattr(self.risk, "risk_per_trade", Config.RISK_PER_TRADE)
-        if not isinstance(base_risk, Real) or base_risk <= 0:
-            base_risk = Config.RISK_PER_TRADE
-        lot = self.risk.calculate_lot_by_atr(
+        lot = self.risk.calculate_lot_for_volatility_target(
             symbol=symbol,
-            equity=equity,
             atr_price=atr_price,
-            target_risk_pct=base_risk * exposure,
+            target_usd=target_usd,
+            exposure=exposure,
             max_lot=max_lot,
+            sharpe_weight=self._vol_target_weight(symbol),
         )
         return lot
+
+    def _vol_target_weight(self, symbol: str) -> float:
+        """Optional Sharpe-based multiplier around the XAUUSD volatility budget."""
+        sharpe_map = getattr(Config, "VOL_TARGET_SHARPE_BY_SYMBOL", {}) or {}
+        ref = float(getattr(Config, "VOL_TARGET_SHARPE_REFERENCE", 0.0) or 0.0)
+        sym_sharpe = sharpe_map.get(symbol)
+        if sym_sharpe is None:
+            return 1.0
+        try:
+            sym_sharpe = float(sym_sharpe)
+            exponent = float(getattr(Config, "VOL_TARGET_SHARPE_EXPONENT", 0.5))
+            min_w = float(getattr(Config, "VOL_TARGET_MIN_SHARPE_WEIGHT", 0.5))
+            max_w = float(getattr(Config, "VOL_TARGET_MAX_SHARPE_WEIGHT", 1.5))
+        except Exception:
+            return 1.0
+        if ref <= 0 or sym_sharpe <= 0:
+            return min_w
+        weight = (sym_sharpe / ref) ** exponent
+        return max(min_w, min(max_w, weight))
 
     def _get_atr(self, symbol: str, period: int = 14) -> float | None:
         """从已加载数据中读取该品种最近 period 根 K 线的 ATR。"""

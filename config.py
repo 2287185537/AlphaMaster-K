@@ -135,15 +135,33 @@ class Config:
     )
 
     # ── 风控参数 ──────────────────────────────────────────
-    RISK_PER_TRADE     = 0.01      # 收益优先：每笔 1 个 ATR 波动约对应账户净值 1%
+    RISK_PER_TRADE     = 0.01      # legacy: 保留给旧接口/测试；实盘仓位使用 VOL_TARGET_* 参数
     COST_RATE          = 0.0001    # 单边点差+佣金（forex/metals）
     MAX_OPEN_POSITIONS = 4         # 最多同时持仓品种数
-    MAX_LOT_PER_TRADE  = 1.0       # 收益优先上限；仍受 MT5 品种规格和保证金约束
-    # 手数校准：
-    # - 黄金（XAUUSD）波动金额显著更大，固定小手数避免整体风险失控
-    # - 其他品种在 ATR 风控手数基础上乘一个系数放大收益弹性
-    XAUUSD_FIXED_LOT   = 0.10
-    OTHER_LOT_MULTIPLIER = 2.0
+    MAX_LOT_PER_TRADE  = 5.0       # 兜底上限；实际手数由 XAUUSD 0.01 手波动预算决定
+    # 永不自动交易的品种（白银合约乘数 5000，2026-07-08 起停用）
+    EXCLUDED_TRADE_SYMBOLS = ["XAGUSD"]
+    # 手数校准（实盘）：
+    # - 以 XAUUSD 0.01 手的一根 ATR 美元波动作为基准
+    # - 其它品种按各自 ATR 与 tick value 反推手数，使金额波动接近
+    # - 可选 Sharpe 权重：Sharpe 高于基准则略放大，低于基准则收缩
+    FIXED_LOT_BY_SYMBOL = {
+        "XAUUSD": 0.01,
+    }
+    VOL_TARGET_REFERENCE_SYMBOL = "XAUUSD"
+    VOL_TARGET_REFERENCE_LOT = 0.01
+    VOL_TARGET_SHARPE_REFERENCE = 2.447
+    VOL_TARGET_SHARPE_EXPONENT = 0.50
+    VOL_TARGET_MIN_SHARPE_WEIGHT = 0.50
+    VOL_TARGET_MAX_SHARPE_WEIGHT = 1.50
+    VOL_TARGET_SHARPE_BY_SYMBOL = {
+        "XAUUSD": 2.447,
+        "US100.cash": 1.811,
+        "US500.cash": 0.959,
+        "US2000.cash": 0.575,
+        "US30.cash": 0.923,
+        "JP225.cash": -0.653,
+    }
     MIN_TRADE_EXPOSURE = 0.05      # |tanh(factor)| 小于该值时视为空仓，回测/实盘共用
 
     # ── 策略参数 ──────────────────────────────────────────

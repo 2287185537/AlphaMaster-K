@@ -152,13 +152,21 @@ class MT5PortfolioManager:
             logger.warning(f"[Portfolio] mt5.positions_get() failed: {mt5.last_error()}")
             return
 
-        # 以 symbol 为 key 建立 MT5 持仓索引
+        allowed_symbols = set(getattr(Config, "SYMBOLS", []) or [])
+        excluded_symbols = set(getattr(Config, "EXCLUDED_TRADE_SYMBOLS", []) or [])
+
+        # 以 symbol 为 key 建立 MT5 持仓索引，仅同步当前自动交易品种。
         # 兼容 mock：若 symbol 属性是字符串才使用；否则降级为按 ticket 匹配
         live_by_symbol: dict[str, object] = {}
         live_tickets: set[int] = set()
         for p in live_positions:
             sym    = getattr(p, "symbol", None)
             ticket = getattr(p, "ticket", None)
+            if isinstance(sym, str):
+                if sym in excluded_symbols:
+                    continue
+                if allowed_symbols and sym not in allowed_symbols:
+                    continue
             if isinstance(sym, str):
                 live_by_symbol[sym] = p
             if isinstance(ticket, int):

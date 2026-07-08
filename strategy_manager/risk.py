@@ -17,6 +17,7 @@ except ImportError:
     _MT5_AVAILABLE = False
     mt5 = None  # type: ignore
 
+import math
 from loguru import logger
 
 try:
@@ -176,24 +177,20 @@ class MT5RiskEngine:
         target_risk_usd = equity * target_risk_pct
 
         # 手数 = 目标风险 / (ATR × 每单位价值/手)
-        # 含义：1个ATR波动时的盈亏 = target_risk_usd
         desired_lot = target_risk_usd / (atr_price * value_per_unit)
 
-        # ── 手数校准：黄金固定，其它品种按系数放大 ─────────────────
-        # 需求：保持黄金始终只下 0.1 手，其它品种按某个系数加大手数。
-        try:
-            xau_fixed = float(getattr(Config, "XAUUSD_FIXED_LOT", 0.10))
-        except Exception:
-            xau_fixed = 0.10
-        try:
-            other_mult = float(getattr(Config, "OTHER_LOT_MULTIPLIER", 1.0))
-        except Exception:
-            other_mult = 1.0
-
-        sym_norm = symbol.upper()
-        if sym_norm.startswith("XAUUSD"):
-            desired_lot = xau_fixed
+        # 固定手数品种（贵金属等），跳过 ATR 计算
+        fixed_map = getattr(Config, "FIXED_LOT_BY_SYMBOL", {}) or {}
+        sym_key = symbol.upper().split(".")[0] if "." not in symbol else symbol
+        if symbol in fixed_map:
+            desired_lot = float(fixed_map[symbol])
+        elif sym_key in fixed_map:
+            desired_lot = float(fixed_map[sym_key])
         else:
+            try:
+                other_mult = float(getattr(Config, "OTHER_LOT_MULTIPLIER", 1.0))
+            except Exception:
+                other_mult = 1.0
             desired_lot = desired_lot * other_mult
 
         # 舍入到 volume_step，clamp
@@ -204,6 +201,89 @@ class MT5RiskEngine:
         logger.debug(
             f"[RiskEngine.atr] {symbol}: equity={equity:.0f} atr={atr_price:.4f} "
             f"val_per_unit={value_per_unit:.4f} desired={desired_lot:.4f} lot={lot:.2f}"
+        )
+        return lot
+
+    def value_per_price_unit(self, symbol: str) -> float:
+        """Return account-currency PnL per 1.0 price move for one lot."""
+        symbol_info = self._get_symbol_info(symbol)
+        if symbol_info is None:
+            logger.warning(f"[RiskEngine.vol] No symbol_info for {symbol}")
+            return 0.0
+
+        tick_val = float(symbol_info.trade_tick_value)
+        tick_size = float(symbol_info.trade_tick_size)
+        if tick_val <= 0 or tick_size <= 0:
+            logger.warning(
+                f"[RiskEngine.vol] Invalid tick data for {symbol}: "
+                f"tick_value={tick_val}, tick_size={tick_size}"
+            )
+            return 0.0
+        return tick_val / tick_size
+
+    def calculate_lot_for_volatility_target(
+        self,
+        symbol: str,
+        atr_price: float,
+        target_usd: float,
+        exposure: float = 1.0,
+        max_lot: float | None = None,
+        sharpe_weight: float = 1.0,
+    ) -> float:
+        """Size lots so one ATR has roughly the requested dollar PnL.
+
+        Unlike the legacy ATR method, this does not clamp undersized requests up
+        to volume_min. If the broker minimum is already too large for the risk
+        budget, returning 0 is safer than opening an oversized position.
+        """
+        if atr_price <= 0 or target_usd <= 0:
+            logger.warning(
+                f"[RiskEngine.vol] Invalid atr={atr_price} target_usd={target_usd} for {symbol}"
+            )
+            return 0.0
+
+        symbol_info = self._get_symbol_info(symbol)
+        if symbol_info is None:
+            logger.warning(f"[RiskEngine.vol] No symbol_info for {symbol}")
+            return 0.0
+
+        value_per_unit = self.value_per_price_unit(symbol)
+        if value_per_unit <= 0:
+            return 0.0
+
+        exposure = max(0.0, min(1.0, float(exposure)))
+        sharpe_weight = max(0.0, float(sharpe_weight))
+        if exposure <= 0 or sharpe_weight <= 0:
+            return 0.0
+
+        desired_lot = (target_usd * exposure * sharpe_weight) / (atr_price * value_per_unit)
+
+        step = float(symbol_info.volume_step)
+        volume_min = float(symbol_info.volume_min)
+        volume_max = float(symbol_info.volume_max)
+        if step <= 0 or volume_min <= 0 or volume_max <= 0:
+            logger.warning(f"[RiskEngine.vol] Invalid volume spec for {symbol}")
+            return 0.0
+
+        cap = volume_max if max_lot is None else min(volume_max, float(max_lot))
+        if desired_lot < volume_min:
+            min_risk = atr_price * value_per_unit * volume_min
+            logger.warning(
+                f"[RiskEngine.vol] {symbol}: desired_lot={desired_lot:.4f} < "
+                f"volume_min={volume_min:.4f}; skip to avoid oversizing "
+                f"(min_1atr_usd={min_risk:.2f}, target_usd={target_usd:.2f})"
+            )
+            return 0.0
+
+        # Round down to avoid exceeding the risk budget by rounding up.
+        lot = math.floor(desired_lot / step) * step
+        lot = max(volume_min, min(lot, cap))
+        lot = round(lot, 8)
+
+        logger.info(
+            f"[RiskEngine.vol] {symbol}: atr={atr_price:.4f} value_per_unit={value_per_unit:.2f} "
+            f"target_usd={target_usd:.2f} exposure={exposure:.2f} weight={sharpe_weight:.2f} "
+            f"desired={desired_lot:.4f} lot={lot:.4f}"
         )
         return lot
 
