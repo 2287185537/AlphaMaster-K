@@ -81,13 +81,21 @@ def _next_bar_close_at(last_bar_open: int | None, timeframe: str, now: float | N
 
 
 def _ensure_closed_bars(bars: list, timeframe: str, now: float | None = None) -> list:
-    """按本机时钟再剔掉尚未收盘的 K 线（防止 MT5 时钟偏快时把形成中 bar 当已收盘）。"""
-    period = _TF_SECONDS.get(timeframe)
-    if not period or not bars:
+    """按本机时钟剔掉时间戳仍在未来的 K 线（双保险，防数据源时钟偏快）。
+
+    各数据源的 fetch_bars(drop_forming=True) 已负责剔除「正在形成」的 bar；
+    这里只删 ts > now 的明显异常 bar（数据源时钟偏快导致返回了未来 bar）。
+
+    不再用 `ts + period > now` 判断：该式假设 ts=开盘时刻，对 A 股日线（15:00
+    收盘但 period 按 86400 秒算）会在收盘当晚误删当天已收盘 bar——因为
+    ts+86400 落到次日，恒大于当晚的 now。改用 ts>now 后，已收盘 bar 的 ts
+    必然 <= now，不会被误删；而真正未收盘/未来的 bar 由各源 drop_forming 处理。
+    """
+    if not bars:
         return bars
     now_i = int(now if now is not None else time.time())
     out = list(bars)
-    while out and int(out[-1].ts) + period > now_i:
+    while out and int(out[-1].ts) > now_i:
         out.pop()
     return out
 
